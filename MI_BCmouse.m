@@ -15,8 +15,9 @@ classdef MI_BCmouse
         recLength;
         currTrial=0;
         inETregion;
-        selCounter=zeros(1,4);
+        selCounter=0;
         selThreshold=.5;
+        selInertia=.5;
         selDecay=0;
         UDPchannels;
         timingParams;
@@ -52,13 +53,13 @@ classdef MI_BCmouse
             obj.CDlength=2;
             
             % Set desired length of recording. 
-            obj.recLength=480;
+            obj.recLength=6000;
             
             % Set colors for different objects
             obj.figureParams.bg=[.05,.05,.05];
             obj.figureParams.ETColorOn=[.1,.1,.1];
             obj.figureParams.ETColorOff=[.2,.2,.2];
-            obj.figureParams.cursorColor=[.4,0,.1];
+            obj.figureParams.cursorColor=[.4,0,0];
             obj.figureParams.barColor=[.3,.3,.3];
             obj.figureParams.targetColor{1}=[0,0,.4];
             obj.figureParams.targetColor{2}=[.4,0,0];
@@ -155,7 +156,7 @@ classdef MI_BCmouse
             % Launch BC mouse controller (for reasons unclear, application
             % will launch only from its directory)
             currDir=pwd;
-            cd('C:\Code\Sources\BCmouse\application.windows64\')
+            cd('c:\GoogleDrive\_2_Programs\_21 Processing\2018_03_21_Mouse_fix_gaze\Fix_gaze\application.windows64\')
             !Fix_gaze.exe &
             cd(currDir)
             
@@ -232,7 +233,7 @@ classdef MI_BCmouse
             
             % Wait, then tell BCmouse controller to close
             pause(5);
-            obj.UDPchannels.udps.step(uint8('esc'));
+            obj.UDPchannels.udps.step(uint8('exit'));
             
             % Clear variables from base workspace
             evalin('base','clear listener*');
@@ -325,12 +326,10 @@ classdef MI_BCmouse
             % Recover current mouse position
             BCmousePos=-str2double(char(obj.UDPchannels.udpr.step)');
             
-            if ~obj.clsfr.isTrained
-                % Update cursor pos accordingly
-                if ~isnan(BCmousePos)
-                    obj.cursorPos=BCmousePos/1e5;
-                    set(obj.figureParams.cursor,'XData',obj.figureParams.cursorShape.X,'YData',obj.figureParams.cursorShape.Y+obj.cursorPos*.6);
-                end
+            % Update cursor pos accordingly
+            if ~isnan(BCmousePos)
+                obj.cursorPos=BCmousePos/1e5;
+                set(obj.figureParams.cursor,'XData',obj.figureParams.cursorShape.X,'YData',obj.figureParams.cursorShape.Y+obj.cursorPos*.6);
             end
             
             if obj.isResetting
@@ -338,11 +337,14 @@ classdef MI_BCmouse
                 if BCmousePos==0
                     obj.isResetting=BCmousePos;
                 end
+                
+                % Use specific label to indicate resetting period
+                currLbl=0;
             else
                 % As long as gaze rests within prescribed region, update cursor
                 % position
                 if obj.inETregion
-                    %                 Update counter of time-in-ETregion
+                    % Update counter of time-in-ETregion
                     if ~isempty(obj.outputLog.time)
                         obj.activeTime=obj.activeTime+obj.currTime-obj.outputLog.time(end);
                     end
@@ -363,7 +365,7 @@ classdef MI_BCmouse
                     end
                     
                     % Test whether target needs removing
-                    if obj.activeTime>obj.trialStart(1)+obj.timingParams.targetPassLength
+                    if ~isempty(obj.trialStart)&&obj.activeTime>obj.trialStart(1)+obj.timingParams.targetPassLength
                         delete(obj.figureParams.target(1));
                         obj.figureParams.target(1)=[];
                         obj.trialStart(1)=[];
@@ -374,56 +376,81 @@ classdef MI_BCmouse
                     % Update log (i.e. check if target to be selected is
                     % between bars)
                     if sum((obj.shortTargetType==2).*(obj.targetPos>obj.figureParams.barLeftPos.X(1)).*(obj.targetPos<obj.figureParams.barRightPos.X(1)))
-                        obj.outputLog.lbls=cat(1,obj.outputLog.lbls,2);
+                        currLbl=2;
                     else
-                        obj.outputLog.lbls=cat(1,obj.outputLog.lbls,1);
+                        currLbl=1;
                     end
                     
                     % Use trained classifier when available, otherwise assume
                     % training session is underway
                     if obj.clsfr.isTrained
-                        % ????
+                        % Low-pass estimations and start moving mouse, if
+                        % applicable
+                        obj.selCounter=obj.selCounter*obj.selInertia+currEst*(1-obj.selInertia);
+                        if obj.selCounter>obj.selThreshold
+                            obj.UDPchannels.udps.step(uint8('f'));
+                        else
+                            obj.UDPchannels.udps.step(uint8('s'));
+                        end
+                        
+                        % Check whether a target is leaving selection zone
+                        if ~isempty(obj.targetPos)&&obj.targetPos(1)>obj.figureParams.barRightPos.X(1)
+                            % Remove target 
+                            delete(obj.figureParams.target(1));
+                            obj.figureParams.target(1)=[];
+                            obj.trialStart(1)=[];
+                            obj.shortTargetType(1)=[];
+                            obj.targetPos(1)=[];
+                            
+                            % Reset robot position
+                            obj.UDPchannels.udps.step(uint8('0'));
+                            obj.isResetting=1;
+                        end
                     else
                         % If relevant target is between bars, start moving
                         % mouse and cursor
-                        if obj.outputLog.lbls(end)==2
+                        if currLbl==2
                             % Start forward mouse movement on state switch
-                            if length(obj.outputLog.lbls)>1&&(obj.outputLog.lbls(end-1)==1||~previousETstate)
+                            if length(obj.outputLog.lbls)>1&&(obj.outputLog.lbls(end)==1||~previousETstate)
                                 obj.UDPchannels.udps.step(uint8('f'));
                                 fprintf('f\n');
                             end
-                            
-                            % Check whether target has been reached
-                            if obj.cursorPos>=1
-                                % Reset robot position
-                                obj.UDPchannels.udps.step(uint8('0'));
-                                obj.isResetting=1;
-                                
-                                % Remove target just reached
-                                removingTarget=find((obj.targetPos>obj.figureParams.barLeftPos.X(1)).*(obj.targetPos<obj.figureParams.barRightPos.X(1)));
-                                delete(obj.figureParams.target(removingTarget));
-                                targetLog.time=obj.currTime;
-                                targetLog.selStart=obj.trialStart(removingTarget);
-                                targetLog.type=obj.shortTargetType(removingTarget);
-                                obj.figureParams.target(removingTarget)=[];
-                                obj.trialStart(removingTarget)=[];
-                                obj.shortTargetType(removingTarget)=[];
-                                obj.targetPos(removingTarget)=[];
-                                
-                                % Log target reached time
-                                obj.outputLog.targetsReached=cat(1,obj.outputLog.targetsReached,targetLog);
-                            end
                         end
+                    end
+                    
+                    % Check whether target has been reached
+                    if obj.cursorPos>=1
+                        % Send click command
+                        obj.UDPchannels.udps.step(uint8('1'));
+                        pause(.1);
+                        
+                        % Reset robot position
+                        obj.UDPchannels.udps.step(uint8('0'));
+                        obj.isResetting=1;
+                        
+                        % Remove target just reached
+                        removingTarget=find((obj.targetPos>obj.figureParams.barLeftPos.X(1)).*(obj.targetPos<obj.figureParams.barRightPos.X(1)));
+                        delete(obj.figureParams.target(removingTarget));
+                        targetLog.time=obj.currTime;
+                        targetLog.selStart=obj.trialStart(removingTarget);
+                        targetLog.type=obj.shortTargetType(removingTarget);
+                        obj.figureParams.target(removingTarget)=[];
+                        obj.trialStart(removingTarget)=[];
+                        obj.shortTargetType(removingTarget)=[];
+                        obj.targetPos(removingTarget)=[];
+                        
+                        % Log target reached time
+                        obj.outputLog.targetsReached=cat(1,obj.outputLog.targetsReached,targetLog);
                     end
                 else
                     % Stop mouse movement
                     if previousETstate
                         obj.UDPchannels.udps.step(uint8('s'));
                     end
+                    currLbl=0;
                 end
             end
             drawnow;
-            
             % Add relevant info to log
             obj.outputLog.cursorPos=cat(1,obj.outputLog.cursorPos,obj.cursorPos');
             obj.outputLog.time=cat(1,obj.outputLog.time,obj.currTime);
@@ -431,6 +458,7 @@ classdef MI_BCmouse
             obj.outputLog.selCounter=cat(1,obj.outputLog.selCounter,obj.selCounter);
             obj.outputLog.feats=cat(1,obj.outputLog.feats,BP);
             obj.outputLog.currEst=cat(1,obj.outputLog.currEst,currEst);
+            obj.outputLog.lbls=cat(1,obj.outputLog.lbls,currLbl);
             
             % Set next evaluation time for this function
             obj.timeTriggeredEvents{1}.triggersLog=[obj.timeTriggeredEvents{1}.triggersLog,obj.currTime];
@@ -523,18 +551,14 @@ classdef MI_BCmouse
             fprintf('Training MI classifier. Please be patient, it will take some time...\n');
             obj.clsfr.svm=fitcsvm(feats,lbls,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
             obj.clsfr.svm=fitPosterior(obj.clsfr.svm);
-            
-            % Remove previous coefficients, if they exist
-            if isfield(obj.clsfr,'mat')
-                obj.clsfr=rmfield(obj.clsfr,'mat');
-            end
+            obj.clsfr.isTrained=1;
         end
         
         function [obj,feats,lbls]=performFeatureSelection(obj)
-            relevantData=logical(obj.outputLog.isInTarget);
+            relevantData=obj.outputLog.isInTarget&(obj.outputLog.lbls>0);
             allFeats=obj.outputLog.feats;
             allFeats=allFeats(relevantData,:);
-            lbls=obj.outputLog.actualTargetType(relevantData);
+            lbls=obj.outputLog.lbls(relevantData);
             
             % Make a first selection of relevant features
             classLbls=unique(lbls);
@@ -550,10 +574,10 @@ classdef MI_BCmouse
             featWorth=computeWorth(m(1,:),m(2,:),md(1,:),md(2,:));
             
             % Keep features with a worth greater than 0.3 (keep at least
-            % 15)
+            % 2)
             [sortedWorth,featOrdr]=sort(featWorth,'descend');
             goodFeatsNumber=sum(sortedWorth>.3);
-            goodFeatsIdx=featOrdr(1:max(15,goodFeatsNumber));
+            goodFeatsIdx=featOrdr(1:max(2,goodFeatsNumber));
             feats=allFeats(:,goodFeatsIdx);
             obj.clsfr.featsIdx=goodFeatsIdx;
         end
